@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import math
+from transformers import GPT2LMHeadModel
 
 
 @dataclass
@@ -11,7 +12,7 @@ class GPTConfig:
     vocab_size: int = 50257  # number of tokens
     n_layer: int = 12  # number of layers
     n_head: int = 12  # number of heads
-    n_embd: 768  # embedding dimensions
+    n_embd: int = 768  # embedding dimensions
 
 
 class CasualSelfAttention(nn.Module):
@@ -96,7 +97,6 @@ class GPT(nn.Module):
     @classmethod
     def from_pretrained(cls, model_type):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
-        from transformers import GPT2LMHeadModel
         print("Loading weights from pre-trained gpt : %s" % model_type)
 
         # n_layer, n_head, n_embd are determined from model_type
@@ -130,7 +130,8 @@ class GPT(nn.Module):
             '.attn.masked_bias')]
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')]
 
-        # the following weights are transposed in GPT-2 as it uses tensorflow library, hence we hardcode transpose them
+        # the following weights are transposed in hugging face GPT-2 as it uses tensorflow
+        # hence, we have to manually transpose them back
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight',
                       'mlp.c_fc.weight', 'mlp.c_proj.weight']
         assert len(sd_keys_hf) == len(sd_keys), f"Mismatched keys : {
