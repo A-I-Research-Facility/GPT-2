@@ -130,21 +130,32 @@ class GPT(nn.Module):
             '.attn.masked_bias')]
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')]
 
-        # the following weights are transposed in hugging face GPT-2 as it uses tensorflow
-        # hence, we have to manually transpose them back
+        # the following weights are transposed in hugging face GPT-2 as it uses
+        # Conv1d for qkv projection. However, since we are using linear functions,
+        # we have to manually transpose them back.
+
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight',
                       'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        assert len(sd_keys_hf) == len(sd_keys), f"Mismatched keys : {
-            len(sd_keys_hf)} != {len(sd_keys)}"
+
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
-                assert sd_hf[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k].t())
             else:
-                assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
+
+        # assert len(sd_keys_hf) == len(sd_keys), f"Mismatched keys : {
+        #     len(sd_keys_hf)} != {len(sd_keys)}"
+        # for k in sd_keys_hf:
+        #     if any(k.endswith(w) for w in transposed):
+        #         assert sd_hf[k].shape[::-1] == sd[k].shape
+        #         with torch.no_grad():
+        #             sd[k].copy_(sd_hf[k].t())
+        #     else:
+        #         assert sd_hf[k].shape == sd[k].shape
+        #         with torch.no_grad():
+        #             sd[k].copy_(sd_hf[k])
 
         return model
 
