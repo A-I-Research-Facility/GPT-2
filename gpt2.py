@@ -17,6 +17,7 @@ So, let’s get started on this exciting journey to building one of the most cut
 """
 
 
+import tiktoken
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -122,7 +123,7 @@ class GPT(nn.Module):
         B, T = idx.size()
         assert T <= self.config.block_size
 
-        pos = torch.arrange(0, T, dtype=torch.long, device=idx.device)
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
         pos_emb = self.transformer.wpe(pos)
         tok_emb = self.transformer.wte(idx)
         x = tok_emb + pos_emb
@@ -194,5 +195,41 @@ class GPT(nn.Module):
         return model
 
 
+num_return_sequences = 5
+max_length = 30
+
+# Initialize our model
 model = GPT.from_pretrained('gpt2')
-print("Didn't crash")
+
+# Put the model in evaluation mode since we are not training it, we are only using it
+model.eval()
+
+# Move the model to cuda
+model.to('cuda')
+
+
+# Create prefix tokens to give our model a start of sentence
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I am a languge model, ")
+tokens = torch.tensor(tokens, dtype=torch.long)  # shape (8, )
+tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # shape (5, 8)
+x = tokens.to('cuda')
+
+# Generate from our model
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits = model(x)
+        logits = logits[:, -1, :]
+        probs = F.softmax(logits, dim=-1)
+        topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+        ix = torch.multinomial(topk_probs, 1)
+        xcol = torch.gather(topk_indices, -1, ix)
+        x = torch.cat((x, xcol), dim=-1)
+
+# Print the generated text
+for i in range(num_return_sequences):
+    tokens = x[i, :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
