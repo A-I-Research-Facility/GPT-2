@@ -17,6 +17,7 @@ So, let’s get started on this exciting journey to building one of the most cut
 """
 
 
+import sys
 import tiktoken
 from dataclasses import dataclass
 import torch
@@ -43,6 +44,7 @@ class CasualSelfAttention(nn.Module):
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
         # regularisation
         self.n_head = config.n_head
         self.n_embd = config.n_embd
@@ -77,6 +79,7 @@ class MLP(nn.Module):
         # Gaussian Error Linear Unit
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4*config.n_embd, config.n_embd)
+        self.c_proj.NANOGPT_SCALE_INIT = 1
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -113,7 +116,24 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+        # weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # init params
+        self.apply(self.init_weights)
+
+    def init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02  # default
+            if hasattr(module, 'NANOGPT_SCALE_INIT'):
+                std *= (2 * self.config.n_layer) ** -0.5
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
         """
         It defines the forward pass of the model, which takes an input tensor idx (token indices) and returns the model's output (logits).
         idx is a tensor of shape (B, T), where:
@@ -133,7 +153,11 @@ class GPT(nn.Module):
 
         x = self.transformer.ln_f(x)
         logits = self.lm_head(x)
-        return logits
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
     # Loading pre trained gpt-2 model weights from hugging face
     @classmethod
@@ -193,6 +217,43 @@ class GPT(nn.Module):
 
         return model
 
+# -----------------------------------------------------------------------------------
+# dataloader
+
+
+class DataLoaderLite:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+
+        # at init load tokens from disk and store them in memory
+        with open('input.txt', 'r') as f:
+            text = f.read()
+        enc = tiktoken.get_encoding('gpt2')
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        print(f"loaded {len(self.tokens)}")
+        print(f"1 epoch = {len(self.tokens) // (B*T)} batches")
+
+        # state
+        self.current_position = 0
+
+    def next_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_position: self.current_position+B*T + 1]
+        x = buf[:-1].view(B, T)  # inputs
+        y = buf[1:].view(B, T)  # targets
+
+        self.current_position += B*T
+
+        if self.current_position + (B*T + 1) > len(self.tokens):
+            self.current_position = 0
+
+        return x, y
+
+
+# -----------------------------------------------------------------------------------
+
 
 # Auto detect available device (cpu / Apple silicon / CUDA)
 device = 'cpu'
@@ -202,20 +263,34 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = 'mps'
 print(f"Using device : {device}")
 
-num_return_sequences = 5
-max_length = 30
-# Create a random model instead of loading gpt2
-# model = GPT.from_pretrained('gpt2')
+torch.manual_seed(1337)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(1337)
+
+train_loader = DataLoaderLite(B=4, T=32)
 model = GPT(GPTConfig())
-model.eval()
 model.to(device)
 
+# optimization
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    x, y = train_loader.next_batch()
+    x, y = x.to(device), y.to(device)
+    optimizer.zero_grad()
+    logits, loss = model(x, y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}, loss : {loss.item()}")
+
+sys.exit(0)
+
+
 # Create prefix tokens to give our model a start of sentence
-enc = tiktoken.get_encoding('gpt2')
-tokens = enc.encode("Hello, I am a languge model, ")
-tokens = torch.tensor(tokens, dtype=torch.long)  # shape (8, )
-tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # shape (5, 8)
-x = tokens.to(device)
+# enc = tiktoken.get_encoding('gpt2')
+# tokens = enc.encode("Hello, I am a languge model, ")
+# tokens = torch.tensor(tokens, dtype=torch.long)  # shape (8, )
+# tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # shape (5, 8)
+# x = tokens.to(device)
 
 # Generate from our model
 torch.manual_seed(42)
@@ -227,7 +302,8 @@ while x.size(1) < max_length:
         probs = F.softmax(logits, dim=-1)  # Convert logits to probabilities
         # Sample from top 50 tokens based on their probabilities
         topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        ix = torch.multinomial(topk_probs, 1)  # Sample one token from the top 50
+        # Sample one token from the top 50
+        ix = torch.multinomial(topk_probs, 1)
         # Select the corresponding token from topk_indices
         x = torch.cat((x, topk_indices.gather(-1, ix)), dim=-1)
 
@@ -237,4 +313,3 @@ tokens_list = x[:, :max_length].tolist()
 decoded_list = [enc.decode(tokens) for tokens in tokens_list]
 for decoded in decoded_list:
     print(">", decoded)
-
