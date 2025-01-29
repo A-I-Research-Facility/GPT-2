@@ -20,7 +20,7 @@ class CasualSelfAttention(nn.Module):
         super().__init__()
         assert config. n_embd % config.n_head == 0
         # key, query, value projections for all heads, in a batch
-        self.c_atn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularisation
@@ -34,7 +34,7 @@ class CasualSelfAttention(nn.Module):
         # batch size, sequence length, embedding dimensions
         B, T, C = x.size()
         # calculate query, key, value for all heads in batch
-        qkv = self.c_atn(x)
+        qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
@@ -137,25 +137,17 @@ class GPT(nn.Module):
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight',
                       'mlp.c_fc.weight', 'mlp.c_proj.weight']
 
+        assert len(sd_keys_hf) == len(sd_keys), f"Mismatched keys : {
+            len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
+                assert sd_hf[k].shape[::-1] == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k].t())
             else:
+                assert sd_hf[k].shape == sd[k].shape
                 with torch.no_grad():
                     sd[k].copy_(sd_hf[k])
-
-        # assert len(sd_keys_hf) == len(sd_keys), f"Mismatched keys : {
-        #     len(sd_keys_hf)} != {len(sd_keys)}"
-        # for k in sd_keys_hf:
-        #     if any(k.endswith(w) for w in transposed):
-        #         assert sd_hf[k].shape[::-1] == sd[k].shape
-        #         with torch.no_grad():
-        #             sd[k].copy_(sd_hf[k].t())
-        #     else:
-        #         assert sd_hf[k].shape == sd[k].shape
-        #         with torch.no_grad():
-        #             sd[k].copy_(sd_hf[k])
 
         return model
 
