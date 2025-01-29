@@ -1,3 +1,22 @@
+"""
+Welcome to the "Building GPT-2 from Scratch" Python Course!
+
+In this course, we’ll dive deep into the fascinating world of natural language processing (NLP) and machine learning by building the GPT-2 model from the ground up. GPT-2, one of the most powerful transformer-based models, is known for generating coherent and contextually relevant text, making it a popular choice for a variety of NLP applications.
+
+Throughout this course, you’ll learn key concepts like:
+
+- How transformers work and the mechanics behind the attention mechanism
+- The architecture of GPT-2 and how it's designed for autoregressive text generation
+- Step-by-step implementation of GPT-2, from tokenization and embedding layers to the final output layers
+- The practicalities of training and fine-tuning a model of this scale
+- Key challenges in working with large models, like memory optimization and efficient computation
+
+By the end of this course, you’ll not only understand the intricacies of GPT-2 but also be equipped to build, train, and customize your own generative models. Whether you’re new to deep learning or looking to deepen your understanding, this course will provide you with the tools and insights needed to take on advanced NLP projects.
+
+So, let’s get started on this exciting journey to building one of the most cutting-edge language models from scratch!
+"""
+
+
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
@@ -93,7 +112,30 @@ class GPT(nn.Module):
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+    def forward(self, idx):
+        """
+        It defines the forward pass of the model, which takes an input tensor idx (token indices) and returns the model's output (logits).
+        idx is a tensor of shape (B, T), where:
+        B is the batch size (number of sequences in the batch).
+        T is the sequence length (number of tokens in each sequence).
+        """
+        B, T = idx.size()
+        assert T <= self.config.block_size
+
+        pos = torch.arrange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        return logits
+
     # Loading pre trained gpt-2 model weights from hugging face
+
     @classmethod
     def from_pretrained(cls, model_type):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
