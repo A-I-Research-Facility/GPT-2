@@ -136,7 +136,6 @@ class GPT(nn.Module):
         return logits
 
     # Loading pre trained gpt-2 model weights from hugging face
-
     @classmethod
     def from_pretrained(cls, model_type):
         assert model_type in {'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'}
@@ -195,41 +194,47 @@ class GPT(nn.Module):
         return model
 
 
+# Auto detect available device (cpu / Apple silicon / CUDA)
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = 'mps'
+print(f"Using device : {device}")
+
 num_return_sequences = 5
 max_length = 30
-
-# Initialize our model
-model = GPT.from_pretrained('gpt2')
-
-# Put the model in evaluation mode since we are not training it, we are only using it
+# Create a random model instead of loading gpt2
+# model = GPT.from_pretrained('gpt2')
+model = GPT(GPTConfig())
 model.eval()
-
-# Move the model to cuda
-model.to('cuda')
-
+model.to(device)
 
 # Create prefix tokens to give our model a start of sentence
 enc = tiktoken.get_encoding('gpt2')
 tokens = enc.encode("Hello, I am a languge model, ")
 tokens = torch.tensor(tokens, dtype=torch.long)  # shape (8, )
 tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)  # shape (5, 8)
-x = tokens.to('cuda')
+x = tokens.to(device)
 
 # Generate from our model
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
+# Keep generating tokens until the sequence reaches max_length
 while x.size(1) < max_length:
     with torch.no_grad():
-        logits = model(x)
-        logits = logits[:, -1, :]
-        probs = F.softmax(logits, dim=-1)
+        logits = model(x)[:, -1, :]  # Get logits for the last token only
+        probs = F.softmax(logits, dim=-1)  # Convert logits to probabilities
+        # Sample from top 50 tokens based on their probabilities
         topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
-        ix = torch.multinomial(topk_probs, 1)
-        xcol = torch.gather(topk_indices, -1, ix)
-        x = torch.cat((x, xcol), dim=-1)
+        ix = torch.multinomial(topk_probs, 1)  # Sample one token from the top 50
+        # Select the corresponding token from topk_indices
+        x = torch.cat((x, topk_indices.gather(-1, ix)), dim=-1)
+
 
 # Print the generated text
-for i in range(num_return_sequences):
-    tokens = x[i, :max_length].tolist()
-    decoded = enc.decode(tokens)
+tokens_list = x[:, :max_length].tolist()
+decoded_list = [enc.decode(tokens) for tokens in tokens_list]
+for decoded in decoded_list:
     print(">", decoded)
+
