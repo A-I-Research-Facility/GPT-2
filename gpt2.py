@@ -67,6 +67,7 @@ class CasualSelfAttention(nn.Module):
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         y = att @ v
+
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
 
@@ -276,6 +277,10 @@ torch.set_float32_matmul_precision('high')
 train_loader = DataLoaderLite(B=8, T=1024)
 model = GPT(GPTConfig())
 model.to(device)
+# torch compile increases compilation time, but model becomes faster. However,
+# it is only supported on linux since it requires triton, which is only
+# available on linux. So we can't use this on windows or mac.
+# model = torch.compile(model)
 
 # optimization
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
