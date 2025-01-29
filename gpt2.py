@@ -17,6 +17,7 @@ So, let’s get started on this exciting journey to building one of the most cut
 """
 
 
+import time
 import sys
 import tiktoken
 from dataclasses import dataclass
@@ -254,7 +255,6 @@ class DataLoaderLite:
 
 # -----------------------------------------------------------------------------------
 
-
 # Auto detect available device (cpu / Apple silicon / CUDA)
 device = 'cpu'
 if torch.cuda.is_available():
@@ -267,21 +267,39 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=4, T=32)
+"""
+Change from normal float32 to TF32 as it truncates the last 13 bits from mantissa thus costing a little bit of precision loss, but significantly improving the cal time.
+"""
+# enable TF32
+torch.set_float32_matmul_precision('high')
+
+train_loader = DataLoaderLite(B=8, T=1024)
 model = GPT(GPTConfig())
 model.to(device)
 
 # optimization
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+init_time = time.time()
+final_time = 0
+for i in range(10):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
-    print(f"step {i}, loss : {loss.item()}")
+    torch.cuda.synchronize()  # wait for gpu to finish work
+    t1 = time.time()
+    final_time = t1
+    dt = (t1 - t0)*1000  # time delta in milliseconds
+    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
+    print(f"step {i}, loss : {loss.item()}, dt : {
+          dt:.2f}ms, tok/sec : {tokens_per_sec:.2f}")
 
+total_time = (final_time - init_time)
+print(f"Total computation time : {total_time:.2f} seconds")
 sys.exit(0)
 
 
