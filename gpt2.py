@@ -309,7 +309,17 @@ the calculation time.
 # convert FP32 to TF32
 torch.set_float32_matmul_precision('high')
 
-train_loader = DataLoaderLite(B=8, T=1024)
+# simulate 0.5 M batch size
+total_batch_size = 524288
+B = 8  # micro batch size
+T = 1024  # sequence length
+assert total_batch_size % (B * T) == 0
+grad_accum_steps = total_batch_size // (B * T)
+print(f"Total desired batch size : {total_batch_size}")
+print(f" => Calculated gradient accumulation steps: {grad_accum_steps}")
+
+
+train_loader = DataLoaderLite(B, T)
 model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 # torch compile increases compilation time, but model becomes faster. However,
@@ -344,12 +354,17 @@ init_time = time.time()
 final_time = 0
 for step in range(max_steps):
     t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-    loss.backward()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        # normalizer for loss
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+        loss.backward()
     # clip the global gradient norm at 1.0
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # dynamic learning rate per iteration
@@ -361,8 +376,8 @@ for step in range(max_steps):
     t1 = time.time()
     final_time = t1
     dt = t1 - t0  # time delta in milliseconds
-    tokens_per_sec = (train_loader.B * train_loader.T) / dt
-    print(f"step {step:4d} | loss : {loss.item():10.3f} | lr : {lr:.4e} | norm : {
+    tokens_per_sec = (train_loader.B * train_loader.T * grad_accum_steps) / dt
+    print(f"step {step:4d} | loss : {loss_accum.item():10.3f} | lr : {lr:.4e} | norm : {
           norm:10.3f} | dt : {dt*1000:.2f}ms | tok/sec : {tokens_per_sec:.2f}")
 
 total_time = (final_time - init_time)
@@ -398,3 +413,6 @@ tokens_list = x[:, :max_length].tolist()
 decoded_list = [enc.decode(tokens) for tokens in tokens_list]
 for decoded in decoded_list:
     print(">", decoded)
+
+
+# 2:34:12
