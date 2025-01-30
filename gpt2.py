@@ -277,7 +277,7 @@ Change from normal float32 to TF32 as it truncates the last 13 bits from mantiss
 torch.set_float32_matmul_precision('high')
 
 train_loader = DataLoaderLite(B=8, T=1024)
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 # torch compile increases compilation time, but model becomes faster. However,
 # it is only supported on linux since it requires triton, which is only
