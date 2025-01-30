@@ -18,13 +18,14 @@ So, let’s get started on this exciting journey to building one of the most cut
 
 
 import time
+import inspect
 import sys
 import tiktoken
 from dataclasses import dataclass
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import math
 from transformers import GPT2LMHeadModel
 
 
@@ -221,8 +222,38 @@ class GPT(nn.Module):
 
         return model
 
-# -----------------------------------------------------------------------------------
-# dataloader
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+
+        print(f"num decayed param tensors : {
+              len(decay_params)}, with {num_decay_params} parameters")
+        print(f"num non-decayed param tensors : {
+              len(nodecay_params)}, with {num_nodecay_params} parameters")
+
+        fused_available = "fused" in inspect.signature(
+            torch.optim.AdamW).parameters
+        use_fused = fused_available and 'cuda' in device
+        print(f"Using fused AdamW: {use_fused}")
+
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(
+            0.9, 0.95), eps=1e-8, fused=use_fused)
+
+        return optimizer
+
+        # -----------------------------------------------------------------------------------
+        # dataloader
 
 
 class DataLoaderLite:
@@ -271,9 +302,11 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
 """
-Change from normal float32 to TF32 as it truncates the last 13 bits from mantissa thus costing a little bit of precision loss, but significantly improving the cal time.
+Change from normal float32 to TF32 as it truncates the last 13 bits from
+mantissa thus costing a little bit of precision, but significantly improving
+the calculation time.
 """
-# enable TF32
+# convert FP32 to TF32
 torch.set_float32_matmul_precision('high')
 
 train_loader = DataLoaderLite(B=8, T=1024)
@@ -284,11 +317,32 @@ model.to(device)
 # available on linux. So we can't use this on windows or mac.
 # model = torch.compile(model)
 
+max_lr = 6e-4
+min_lr = 0.1 * max_lr
+warmup_steps = 10
+max_steps = 50
+
+
+def get_lr(it):  # learning rate schedule
+    # linear warmup to highest lr
+    if it < warmup_steps:
+        return max_lr * (it + 1) / warmup_steps
+    # min lr for final edge case
+    if it > max_steps:
+        return min_lr
+    # use cosine decay from initial to final edge cases
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
+
+
 # optimization
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = model.configure_optimizers(
+    weight_decay=0.1, learning_rate=6e-4, device=device)
 init_time = time.time()
 final_time = 0
-for i in range(50):
+for step in range(max_steps):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
@@ -296,14 +350,20 @@ for i in range(50):
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
     loss.backward()
+    # clip the global gradient norm at 1.0
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    # dynamic learning rate per iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize()  # wait for gpu to finish work
     t1 = time.time()
     final_time = t1
-    dt = (t1 - t0)*1000  # time delta in milliseconds
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-    print(f"step {i}, loss : {loss.item()}, dt : {
-          dt:.2f}ms, tok/sec : {tokens_per_sec:.2f}")
+    dt = t1 - t0  # time delta in milliseconds
+    tokens_per_sec = (train_loader.B * train_loader.T) / dt
+    print(f"step {step:4d} | loss : {loss.item():10.3f} | lr : {lr:.4e} | norm : {
+          norm:10.3f} | dt : {dt*1000:.2f}ms | tok/sec : {tokens_per_sec:.2f}")
 
 total_time = (final_time - init_time)
 print(f"Total computation time : {total_time:.2f} seconds")
